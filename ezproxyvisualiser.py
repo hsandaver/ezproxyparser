@@ -1,20 +1,21 @@
-import streamlit as st
-import pandas as pd
 import re
+import pandas as pd
+import streamlit as st
 from io import StringIO
-from typing import Dict
+from typing import Dict, List, Callable
+import plotly.express as px
 
 def split_into_sections(raw_text: str) -> Dict[str, str]:
     """
     Splits the raw log text into sections based on known headers.
-
-    Args:
-        raw_text (str): The entire log text.
-
+    
+    Parameters:
+        raw_text (str): The complete log text.
+        
     Returns:
-        Dict[str, str]: A dictionary where keys are section titles and values are section contents.
+        Dict[str, str]: A dictionary mapping section headers to their content.
     """
-    section_header_pattern = re.compile(
+    header_pattern = re.compile(
         r"""
         ^(Audit Report.*|
           Report\ of\ all\ logins.*|
@@ -29,66 +30,83 @@ def split_into_sections(raw_text: str) -> Dict[str, str]:
         """,
         re.VERBOSE | re.MULTILINE
     )
-
-    parts = re.split(section_header_pattern, raw_text)
+    parts = re.split(header_pattern, raw_text)
     sections: Dict[str, str] = {}
-
-    # Add any text before the first header as a preamble section.
+    
+    # Capture any preamble text before the first header.
     if parts[0].strip():
         sections["(pre-file text)"] = parts[0].strip()
-
-    # Each section is a pair of header and content.
+    
+    # Pair each header with its subsequent content.
     for i in range(1, len(parts), 2):
         header = parts[i].strip()
-        content = parts[i+1].strip() if i+1 < len(parts) else ""
+        content = parts[i+1].strip() if i + 1 < len(parts) else ""
         sections[header] = content
-
+    
     return sections
+
+def _parse_table_with_regex(table_text: str, regex: re.Pattern, skip_func: Callable[[str], bool]) -> List[Dict[str, str]]:
+    """
+    Utility function to parse table rows using a given regex and a line-skipping function.
+    
+    Parameters:
+        table_text (str): The text containing table data.
+        regex (re.Pattern): A compiled regex pattern with named groups.
+        skip_func (Callable[[str], bool]): A function that returns True for lines that should be skipped.
+        
+    Returns:
+        List[Dict[str, str]]: A list of dictionaries corresponding to parsed rows.
+    """
+    rows = []
+    for line in table_text.splitlines():
+        line = line.strip()
+        if not line or skip_func(line):
+            continue
+        match = regex.match(line)
+        if match:
+            rows.append(match.groupdict())
+    return rows
 
 def parse_logins_table(table_text: str) -> pd.DataFrame:
     """
     Parses a logins table from the given text and returns a DataFrame.
     """
-    pattern = re.compile(
+    regex = re.compile(
         r"""^
-         (?P<login_date>\d{4}-\d{2}-\d{2})\s+
-         (?P<login_time>\d{2}:\d{2}:\d{2})\s+
-         (?P<logout_date>\S+)\s+
-         (?P<logout_time>\S+)\s+
-         (?P<username>\S+)\s+
-         (?P<session>\S+)\s+
-         (?P<ip>\S+)\s+
-         (?P<geography>.*)$
-         """,
+        (?P<login_date>\d{4}-\d{2}-\d{2})\s+
+        (?P<login_time>\d{2}:\d{2}:\d{2})\s+
+        (?P<logout_date>\S+)\s+
+        (?P<logout_time>\S+)\s+
+        (?P<username>\S+)\s+
+        (?P<session>\S+)\s+
+        (?P<ip>\S+)\s+
+        (?P<geography>.*)$
+        """,
         re.VERBOSE
     )
-    rows = []
-    for line in table_text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("Login Date") or "Username" in line:
-            continue
-        match = pattern.match(line)
-        if match:
-            rows.append(match.groupdict())
+    rows = _parse_table_with_regex(
+        table_text,
+        regex,
+        lambda line: line.startswith("Login Date") or "Username" in line
+    )
     return pd.DataFrame(rows)
 
 def parse_login_summary_table(table_text: str) -> pd.DataFrame:
     """
     Parses a login summary table from the given text and returns a DataFrame.
     """
-    rows = []
-    pattern = re.compile(r"""
-       ^\s*(?P<username>\S+)\s+
-         (?P<successful>\d+)\s+
-         (?P<failures>\d+)\s*$
-    """, re.VERBOSE)
-    for line in table_text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("Username") or line.startswith("Login summary"):
-            continue
-        match = pattern.match(line)
-        if match:
-            rows.append(match.groupdict())
+    regex = re.compile(
+        r"""^\s*(?P<username>\S+)\s+
+        (?P<successful>\d+)\s+
+        (?P<failures>\d+)\s*$
+        """,
+        re.VERBOSE
+    )
+    rows = _parse_table_with_regex(
+        table_text,
+        regex,
+        lambda line: line.startswith("Username") or line.startswith("Login summary")
+    )
     df = pd.DataFrame(rows)
     if not df.empty:
         df["successful"] = df["successful"].astype(int)
@@ -99,38 +117,33 @@ def parse_multiple_geographies_table(table_text: str) -> pd.DataFrame:
     """
     Parses a multiple geographies table from the given text and returns a DataFrame.
     """
-    rows = []
-    pattern = re.compile(r"""
-       ^user\s+(?P<username>\S+)\s+(?P<count>\d+)\s+(?P<geographies>.*)
-    """, re.VERBOSE)
-    for line in table_text.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("user "):
-            continue
-        match = pattern.match(line)
-        if match:
-            rows.append(match.groupdict())
+    regex = re.compile(
+        r"""^user\s+(?P<username>\S+)\s+(?P<count>\d+)\s+(?P<geographies>.*)""",
+        re.VERBOSE
+    )
+    rows = _parse_table_with_regex(
+        table_text,
+        regex,
+        lambda line: line.lower().startswith("user ")
+    )
     return pd.DataFrame(rows)
 
 def parse_provider_access_table(table_text: str) -> pd.DataFrame:
     """
     Parses a provider access table from the given text and returns a DataFrame.
     """
-    rows = []
-    pattern = re.compile(
+    regex = re.compile(
         r"""^(?P<provider>\S+)\s+
-             (?P<kb>\d+\.\d+)\s+
-             (?P<errors>\d+)\s+
-             (?P<total>\d+)$
-        """, re.VERBOSE
+        (?P<kb>\d+\.\d+)\s+
+        (?P<errors>\d+)\s+
+        (?P<total>\d+)$""",
+        re.VERBOSE
     )
-    for line in table_text.splitlines():
-        line = line.strip()
-        if not line or "Content Provider" in line or "Total KB" in line:
-            continue
-        match = pattern.match(line)
-        if match:
-            rows.append(match.groupdict())
+    rows = _parse_table_with_regex(
+        table_text,
+        regex,
+        lambda line: "Content Provider" in line or "Total KB" in line
+    )
     df = pd.DataFrame(rows)
     if not df.empty:
         df["kb"] = pd.to_numeric(df["kb"], errors="coerce")
@@ -142,17 +155,15 @@ def parse_kb_usage_by_user(table_text: str) -> pd.DataFrame:
     """
     Parses a KB usage by user table from the given text and returns a DataFrame.
     """
-    rows = []
-    pattern = re.compile(r"""
-        ^\s*(?P<username>\S+)\s+(?P<kb>\d+\.\d+)\s*$
-    """, re.VERBOSE)
-    for line in table_text.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("username") or "Total KB" in line:
-            continue
-        match = pattern.match(line)
-        if match:
-            rows.append(match.groupdict())
+    regex = re.compile(
+        r"""^\s*(?P<username>\S+)\s+(?P<kb>\d+\.\d+)\s*$""",
+        re.VERBOSE
+    )
+    rows = _parse_table_with_regex(
+        table_text,
+        regex,
+        lambda line: line.lower().startswith("username") or "Total KB" in line
+    )
     df = pd.DataFrame(rows)
     if not df.empty:
         df["kb"] = pd.to_numeric(df["kb"], errors="coerce")
@@ -160,17 +171,16 @@ def parse_kb_usage_by_user(table_text: str) -> pd.DataFrame:
 
 def display_dataframe(name: str, df: pd.DataFrame) -> None:
     """
-    Displays the DataFrame in Streamlit with search functionality,
-    visualization, and a download button.
-
-    Args:
+    Displays the DataFrame in Streamlit with search functionality, visualisation, and a download button.
+    
+    Parameters:
         name (str): The name of the DataFrame.
         df (pd.DataFrame): The DataFrame to display.
     """
     st.subheader(f"DataFrame: {name}")
 
     # Search/filter input
-    search_query = st.text_input(f"Search in {name}", value="", key=name+"_search")
+    search_query = st.text_input(f"Search in {name}", value="", key=name + "_search")
     filtered_df = df.copy()
     if search_query:
         # Filter rows where any cell contains the search query (case-insensitive)
@@ -179,10 +189,10 @@ def display_dataframe(name: str, df: pd.DataFrame) -> None:
 
     st.dataframe(filtered_df)
 
-    # For provider access data, show a bar chart visualization if applicable.
+    # For provider access data, show a bar chart visualisation if applicable.
     if name in ["ProviderAccess", "ProviderAccess_byKB"]:
         if not filtered_df.empty and "provider" in filtered_df.columns and "kb" in filtered_df.columns:
-            st.subheader(f"Visualization for {name}")
+            st.subheader(f"Visualisation for {name}")
             chart_data = filtered_df.set_index("provider")["kb"]
             st.bar_chart(chart_data)
 
@@ -195,6 +205,58 @@ def display_dataframe(name: str, df: pd.DataFrame) -> None:
         file_name=f"{name}.csv",
         mime="text/csv"
     )
+
+def visualize_logins_time_series(df: pd.DataFrame) -> None:
+    """
+    Visualises login frequency over time by combining login_date and login_time.
+    """
+    if "login_date" not in df.columns or "login_time" not in df.columns:
+        st.warning("Required columns for time series visualisation not found.")
+        return
+
+    # Create a datetime column from date and time.
+    df["timestamp"] = pd.to_datetime(df["login_date"] + " " + df["login_time"], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp")
+    
+    # Aggregate counts per day.
+    df_count = df.groupby(pd.Grouper(key="timestamp", freq="D")).size().reset_index(name="count")
+    
+    st.line_chart(df_count.set_index("timestamp")["count"])
+
+def visualize_login_summary(df: pd.DataFrame) -> None:
+    """
+    Visualises login summary with a stacked bar chart showing successful vs. failed login attempts.
+    """
+    if "username" not in df.columns:
+        st.warning("Username column missing in Login Summary data.")
+        return
+
+    df["successful"] = df["successful"].astype(int)
+    df["failures"] = df["failures"].astype(int)
+    df_plot = df.set_index("username")
+    
+    st.bar_chart(df_plot[["successful", "failures"]])
+
+def visualize_provider_access_scatter(df: pd.DataFrame) -> None:
+    """
+    Visualises provider access data with a scatter plot comparing KB transferred vs. errors.
+    """
+    if "kb" not in df.columns or "errors" not in df.columns:
+        st.warning("Necessary columns for scatter plot not found.")
+        return
+    
+    st.scatter_chart(df[["kb", "errors"]])
+
+def visualize_kb_usage_pie(df: pd.DataFrame) -> None:
+    """
+    Visualises KB usage distribution among users as a pie chart.
+    """
+    if "username" not in df.columns or "kb" not in df.columns:
+        st.warning("Required columns for pie chart visualisation not found.")
+        return
+    
+    fig = px.pie(df, names="username", values="kb", title="KB Usage Distribution by User")
+    st.plotly_chart(fig)
 
 def main() -> None:
     """
@@ -210,59 +272,61 @@ def main() -> None:
             st.error(f"Error reading file: {e}")
             return
 
-        st.write(f"Loaded file with length: {len(raw_text)} chars")
+        st.write(f"Loaded file with length: {len(raw_text)} characters")
 
         # Step 1: Split the raw text into sections.
-        sections_dict = split_into_sections(raw_text)
-        st.write("Found these sections:", list(sections_dict.keys()))
+        sections = split_into_sections(raw_text)
+        st.write("Found these sections:", list(sections.keys()))
 
-        # Step 2: Attempt to parse known sections.
+        # Mapping of section keywords to parser functions and a key for the resulting DataFrame.
+        parser_mapping = [
+            ("report of all logins sorted by username", "Logins", parse_logins_table),
+            ("login summary sorted by username", "LoginSummary", parse_login_summary_table),
+            ("all successful logins coming from multiple geographies", "MultipleGeographies", parse_multiple_geographies_table),
+            ("report of all content provider accesses sorted by kb transferred", "ProviderAccess_byKB", parse_provider_access_table),
+            ("report of all content provider accesses", "ProviderAccess", parse_provider_access_table),
+            ("report total kb usage by user", None, parse_kb_usage_by_user),  # Use header text in key.
+        ]
+
         df_dict: Dict[str, pd.DataFrame] = {}
-        for header, content in sections_dict.items():
-            lower_header = header.lower()
+        for header_keyword, key_name, parser_func in parser_mapping:
+            for sec_header, content in sections.items():
+                if header_keyword in sec_header.lower():
+                    df = parser_func(content)
+                    if not df.empty:
+                        final_key = key_name if key_name is not None else f"KBUsage_{sec_header}"
+                        df_dict[final_key] = df
+                    break  # Stop after finding the first match.
 
-            if "report of all logins sorted by username" in lower_header:
-                df = parse_logins_table(content)
-                if not df.empty:
-                    df_dict["Logins"] = df
-                continue
-
-            if "login summary sorted by username" in lower_header:
-                df = parse_login_summary_table(content)
-                if not df.empty:
-                    df_dict["LoginSummary"] = df
-                continue
-
-            if "all successful logins coming from multiple geographies" in lower_header:
-                df = parse_multiple_geographies_table(content)
-                if not df.empty:
-                    df_dict["MultipleGeographies"] = df
-                continue
-
-            if "report of all content provider accesses sorted by kb transferred" in lower_header:
-                df = parse_provider_access_table(content)
-                if not df.empty:
-                    df_dict["ProviderAccess_byKB"] = df
-                continue
-
-            if "report of all content provider accesses" in lower_header and "sorted by kb" not in lower_header:
-                df = parse_provider_access_table(content)
-                if not df.empty:
-                    df_dict["ProviderAccess"] = df
-                continue
-
-            if "report total kb usage by user" in lower_header:
-                df = parse_kb_usage_by_user(content)
-                if not df.empty:
-                    df_dict[f"KBUsage_{header}"] = df
-                continue
-
-        # Step 3: Show results in Streamlit.
         if not df_dict:
-            st.warning("Eep! No recognized data tables were found, nyah~! You might need to add more custom logic.")
+            st.warning("No recognised data tables were found. You might need to add more custom logic!")
         else:
             for name, df in df_dict.items():
                 display_dataframe(name, df)
+
+            # Additional Visualisations
+            st.markdown("## Extra Visualisations")
+
+            if "Logins" in df_dict:
+                st.subheader("Login Activity Over Time")
+                visualize_logins_time_series(df_dict["Logins"])
+
+            if "LoginSummary" in df_dict:
+                st.subheader("Login Summary (Success vs Failures)")
+                visualize_login_summary(df_dict["LoginSummary"])
+
+            if "ProviderAccess" in df_dict:
+                st.subheader("Provider Access Scatter Plot")
+                visualize_provider_access_scatter(df_dict["ProviderAccess"])
+            elif "ProviderAccess_byKB" in df_dict:
+                st.subheader("Provider Access Scatter Plot")
+                visualize_provider_access_scatter(df_dict["ProviderAccess_byKB"])
+
+            # Visualisation for KB Usage tables (if any)
+            for key, df in df_dict.items():
+                if key.startswith("KBUsage"):
+                    st.subheader(f"KB Usage Distribution: {key}")
+                    visualize_kb_usage_pie(df)
 
 if __name__ == "__main__":
     main()
