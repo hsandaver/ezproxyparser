@@ -169,6 +169,38 @@ def parse_kb_usage_by_user(table_text: str) -> pd.DataFrame:
         df["kb"] = pd.to_numeric(df["kb"], errors="coerce")
     return df
 
+def parse_spu_summary_usage(table_text: str) -> pd.DataFrame:
+    """
+    Parses an "SPU Summary SORTED BY usage" table and returns a DataFrame.
+
+    Expected columns in the table are:
+      - WEB SITE DNS NAME
+      - NUMBER OF ACCESSES
+      - 599/UNKNOWN ACCESSES
+    """
+    # Regex captures: DNS (no spaces), number_of_accesses (int), unknown_599 (int)
+    regex = re.compile(r"^\s*(?P<dns>\S+)\s+(?P<number_of_accesses>\d+)\s+(?P<unknown_599>\d+)\s*$")
+
+    def _skip(line: str) -> bool:
+        header_markers = [
+            "WEB SITE DNS NAME",
+            "NUMBER OF ACCESSES",
+            "599/UNKNOWN ACCESSES",
+        ]
+        if not line:
+            return True
+        # Skip header lines or separators
+        return any(h.lower() in line.lower() for h in header_markers)
+
+    rows = _parse_table_with_regex(table_text, regex, _skip)
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df["number_of_accesses"] = pd.to_numeric(df["number_of_accesses"], errors="coerce").fillna(0).astype(int)
+        df["unknown_599"] = pd.to_numeric(df["unknown_599"], errors="coerce").fillna(0).astype(int)
+        # Ensure sorted by usage descending, regardless of source ordering
+        df = df.sort_values("number_of_accesses", ascending=False, kind="mergesort").reset_index(drop=True)
+    return df
+
 def display_dataframe(name: str, df: pd.DataFrame) -> None:
     """
     Displays the DataFrame in Streamlit with search functionality, visualisation, and a download button.
@@ -195,6 +227,15 @@ def display_dataframe(name: str, df: pd.DataFrame) -> None:
             st.subheader(f"Visualisation for {name}")
             chart_data = filtered_df.set_index("provider")["kb"]
             st.bar_chart(chart_data)
+
+    # For SPU Summary by usage, show a bar chart of accesses per DNS.
+    if not filtered_df.empty and "dns" in filtered_df.columns and "number_of_accesses" in filtered_df.columns:
+        st.subheader(f"Visualisation for {name}")
+        chart_data = (
+            filtered_df.sort_values("number_of_accesses", ascending=False)
+            .set_index("dns")["number_of_accesses"]
+        )
+        st.bar_chart(chart_data)
 
     # Create a download button for the CSV data.
     csv_buf = StringIO()
@@ -286,6 +327,7 @@ def main() -> None:
             ("report of all content provider accesses sorted by kb transferred", "ProviderAccess_byKB", parse_provider_access_table),
             ("report of all content provider accesses", "ProviderAccess", parse_provider_access_table),
             ("report total kb usage by user", None, parse_kb_usage_by_user),  # Use header text in key.
+            ("spu summary sorted by usage", "SPUSummary_byUsage", parse_spu_summary_usage),
         ]
 
         df_dict: Dict[str, pd.DataFrame] = {}
